@@ -69,6 +69,7 @@ class UserProfile(BaseModel):
     certificates: Optional[List[Certificate]]
     availability: Optional[str]
     pfp_url: Optional[HttpUrl]
+    onboarding_completed: Optional[bool] = False
 
 class UserResponse(BaseModel):
     email: EmailStr

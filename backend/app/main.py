@@ -7,11 +7,13 @@ from config import SOFTWARE_NAME
 from database import close_db, get_db, init_db
 from fastapi import BackgroundTasks, FastAPI
 from routers import auth, legal, payment, protected, profile
+from utils.s3 import init_s3
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+    init_s3()
 
     asyncio.create_task(cleanup_expired_sessions())
 
