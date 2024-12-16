@@ -1,199 +1,204 @@
-import re
 from datetime import datetime
 from math import ceil
 from typing import Optional
 
-import mercadopago
-from bson import ObjectId
-from config import CREDIT_VALUE, MERCADO_PAGO_ACCESS_TOKEN
-from database import get_db
-from fastapi import APIRouter, Depends, HTTPException, Query
-from models.payment import (
-    CardInfo,
-    PaginatedPaymentResponse,
-    PaymentCreate,
-    PaymentResponse,
-    PixPaymentCreate,
-    PixPaymentResponse,
+import stripe
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from config import (
+    STRIPE_SECRET_KEY,
+    STRIPE_WEBHOOK_SECRET,
+    PAYMENT_MODE,
+    CREDIT_VALUE,
+    SUBSCRIPTION_PRICE_ID,
+    SUCCESS_URL,
+    CANCEL_URL,
 )
-from models.user import UserAddCredits
+from database import get_db
+from models.payment import PaymentCreate, PaymentResponse, PaginatedPaymentResponse, PaymentType, SubscriptionStatus
 from utils.security import get_current_user
+from bson import ObjectId
 
 router = APIRouter()
-sdk = mercadopago.SDK(MERCADO_PAGO_ACCESS_TOKEN)
+stripe.api_key = STRIPE_SECRET_KEY
 
-def get_payment_method_id(card_number: str):
-    payment_methods = sdk.payment_methods().list_all()
 
-    for method in payment_methods["response"]:
-        if method["payment_type_id"] == "credit_card":
-            for setting in method["settings"]:
-                if "bin" in setting:
-                    pattern = setting["bin"].get("pattern")
-                    exclusion_pattern = setting["bin"].get("exclusion_pattern")
-
-                    if pattern and re.match(pattern, card_number):
-                        if exclusion_pattern and re.match(exclusion_pattern, card_number):
-                            continue
-                        return method["id"]
-
-    raise HTTPException(status_code=400, detail="Unable to determine payment method")
-
-@router.post("/create_payment", response_model=PaymentResponse)
-async def create_payment(payment: PaymentCreate, card: Optional[CardInfo] = None, current_user: str = Depends(get_current_user)):
+@router.post(
+    "/create_checkout",
+    response_model=PaymentResponse,
+    summary="Create Checkout Session",
+    description="""
+Creates a checkout session for the user\n
+The parameter payment_type can be either `subscription` or `credit`\n
+If payment_type is `credit`, the parameter amount is required\n
+""",
+)
+async def create_checkout_session(payment: PaymentCreate, current_user: str = Depends(get_current_user)):
     db = get_db()
     user = db.users.find_one({"email": current_user})
 
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    payment_data = {
-        "transaction_amount": float(payment.amount),
-        "description": payment.description,
-        "payment_method_id": payment.payment_method,
-        "payer": {
-            "email": user["email"]
-        }
-    }
+    # print PAYMENT_MODE
+    print(PAYMENT_MODE)
 
-    if payment.payment_method == "credit_card":
-        if not card:
-            raise HTTPException(status_code=400, detail="Card info is required for credit card payments")
+    if payment.payment_type == PaymentType.SUBSCRIPTION and PAYMENT_MODE.upper() != "SUBSCRIPTION":
+        raise HTTPException(status_code=400, detail="Subscription payments are not enabled")
 
-        card_data = {
-            "card_number": card.card_number,
-            "expiration_month": card.expiration_month,
-            "expiration_year": card.expiration_year,
-            "security_code": card.security_code,
-            "cardholder": {
-                "name": card.cardholder_name
+    if payment.payment_type == PaymentType.CREDIT and PAYMENT_MODE.upper() != "CREDIT":
+        raise HTTPException(status_code=400, detail="Credit payments are not enabled")
+
+    try:
+        if payment.payment_type == PaymentType.SUBSCRIPTION:
+            session = stripe.checkout.Session.create(
+                customer_email=user["email"],
+                payment_method_types=["card"],
+                line_items=[
+                    {
+                        "price": SUBSCRIPTION_PRICE_ID,
+                        "quantity": 1,
+                    }
+                ],
+                mode="subscription",
+                success_url=SUCCESS_URL,
+                cancel_url=CANCEL_URL,
+                metadata={"user_id": str(user["_id"]), "payment_type": "subscription"},
+            )
+        else:  # CREDIT payment
+            if not payment.amount:
+                raise HTTPException(status_code=400, detail="Amount is required for credit payments")
+
+            credits = float(payment.amount) / CREDIT_VALUE
+            session = stripe.checkout.Session.create(
+                customer_email=user["email"],
+                payment_method_types=["card"],
+                line_items=[
+                    {
+                        "price_data": {
+                            "currency": "usd",
+                            "product_data": {
+                                "name": f"{credits} Credits",
+                            },
+                            "unit_amount": int(float(payment.amount) * 100),  # Convert to cents
+                        },
+                        "quantity": 1,
+                    }
+                ],
+                mode="payment",
+                success_url=SUCCESS_URL,
+                cancel_url=CANCEL_URL,
+                metadata={"user_id": str(user["_id"]), "payment_type": "credit", "credits": str(credits)},
+            )
+
+        # Store payment intent in database
+        db.payments.insert_one(
+            {
+                "user_id": user["_id"],
+                "session_id": session.id,
+                "status": "pending",
+                "amount": float(payment.amount) if payment.amount else None,
+                "payment_type": payment.payment_type,
+                "payment_date": datetime.utcnow(),
+                "credits_added": False,
             }
-        }
-
-        card_token_result = sdk.card_token().create(card_data)
-
-        if card_token_result["status"] != 201:
-            raise HTTPException(status_code=400, detail="Failed to create card token")
-
-        card_token = card_token_result["response"]["id"]
-        payment_data["token"] = card_token
-        payment_data["installments"] = payment.installments
-        payment_data["payment_method_id"] = get_payment_method_id(card.card_number)
-
-    elif payment.payment_method == "pix":
-        payment_data["payment_method_id"] = "pix"
-    else:
-        raise HTTPException(status_code=400, detail="Invalid payment method")
-
-    payment_response = sdk.payment().create(payment_data)
-
-    if payment_response["status"] == 201:
-        payment_result = payment_response["response"]
-        db.payments.insert_one({
-            "user_id": user["_id"],
-            "payment_id": payment_result["id"],
-            "status": payment_result["status"],
-            "amount": float(payment.amount),
-            "description": payment.description,
-            "payment_method": payment.payment_method,
-            "payment_date": datetime.utcnow(),
-            "credits_added": False
-        })
-
-        if payment.payment_method == "credit_card" and payment_result["status"] == "approved":
-            credits_to_add = float(payment.amount) / CREDIT_VALUE
-            db.users.update_one(
-                {"_id": user["_id"]},
-                {"$inc": {"credits": credits_to_add}}
-            )
-            db.payments.update_one(
-                {"payment_id": payment_result["id"]},
-                {"$set": {"credits_added": True}}
-            )
+        )
 
         return PaymentResponse(
-            id=str(payment_result["id"]),
-            status=payment_result["status"],
-            amount=float(payment.amount),
-            description=payment.description,
-            payment_method=payment.payment_method
+            id=session.id,
+            status="pending",
+            amount=float(payment.amount) if payment.amount else None,
+            payment_type=payment.payment_type,
+            checkout_url=session.url,
         )
-    else:
-        raise HTTPException(status_code=400, detail="Payment creation failed")
 
-@router.post("/create_pix_payment", response_model=PixPaymentResponse)
-async def create_pix_payment(payment: PixPaymentCreate, current_user: str = Depends(get_current_user)):
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post(
+    "/webhook",
+    summary="Stripe Webhook",
+    description="Receives verified webhook events from Stripe. Should not be called manually.",
+)
+async def stripe_webhook(request: Request):
+    payload = await request.body()
+    sig_header = request.headers.get("stripe-signature")
+
+    try:
+        event = stripe.Webhook.construct_event(payload, sig_header, STRIPE_WEBHOOK_SECRET)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid payload")
+    except stripe.error.SignatureVerificationError:
+        raise HTTPException(status_code=400, detail="Invalid signature")
+
     db = get_db()
-    user = db.users.find_one({"email": current_user})
 
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
+    if event.type == "checkout.session.completed":
+        session = event.data.object
+        payment_type = session.metadata.get("payment_type")
+        user_id = ObjectId(session.metadata.get("user_id"))
 
-    payment_data = {
-        "transaction_amount": float(payment.amount),
-        "description": payment.description,
-        "payment_method_id": "pix",
-        "payer": {
-            "email": user["email"]
-        }
-    }
+        if payment_type == "credit":
+            credits = float(session.metadata.get("credits", 0))
+            db.users.update_one({"_id": user_id}, {"$inc": {"credits": credits}})
+            db.payments.update_one({"session_id": session.id}, {"$set": {"status": "completed", "credits_added": True}})
+        elif payment_type == "subscription":
+            subscription = stripe.Subscription.retrieve(session.subscription)
 
-    payment_response = sdk.payment().create(payment_data)
+            db.users.update_one(
+                {"_id": user_id},
+                {
+                    "$set": {
+                        "subscription_status": "active",
+                        "subscription_id": session.subscription,
+                        "current_period_end": datetime.fromtimestamp(subscription.current_period_end),
+                    }
+                },
+            )
+            db.payments.update_one({"session_id": session.id}, {"$set": {"status": "completed"}})
 
-    if payment_response["status"] == 201:
-        payment_result = payment_response["response"]
-        db.payments.insert_one({
-            "user_id": user["_id"],
-            "payment_id": str(payment_result["id"]),
-            "status": payment_result["status"],
-            "amount": float(payment.amount),
-            "description": payment.description,
-            "payment_method": "pix",
-            "payment_date": datetime.utcnow(),
-            "credits_added": False
-        })
-
-        return PixPaymentResponse(
-            qr_code=payment_result["point_of_interaction"]["transaction_data"]["qr_code"],
-            qr_code_base64=payment_result["point_of_interaction"]["transaction_data"]["qr_code_base64"],
-            ticket_url=payment_result["point_of_interaction"]["transaction_data"]["ticket_url"]
+    elif event.type == "customer.subscription.deleted":
+        subscription = event.data.object
+        db.users.update_one(
+            {"subscription_id": subscription.id},
+            {"$set": {"subscription_status": "inactive", "subscription_id": None, "current_period_end": None}},
         )
-    else:
-        raise HTTPException(status_code=400, detail="Pix payment creation failed")
-
-@router.post("/webhook")
-async def payment_webhook(data: dict):
-    if data["type"] == "payment":
-        payment_id = data["data"]["id"]
-        payment_info = sdk.payment().get(payment_id)
-
-        if payment_info["status"] == 200:
-            payment = payment_info["response"]
-            db = get_db()
-            db_payment = db.payments.find_one({"payment_id": payment_id})
-
-            if db_payment and not db_payment["credits_added"] and payment["status"] == "approved":
-                print("in")
-                user = db.users.find_one({"_id": db_payment["user_id"]})
-                if user:
-                    credits_to_add = float(payment["transaction_amount"]) / CREDIT_VALUE
-                    db.users.update_one(
-                        {"_id": user["_id"]},
-                        {"$inc": {"credits": credits_to_add}}
-                    )
-                    db.payments.update_one(
-                        {"payment_id": payment_id},
-                        {"$set": {"credits_added": True, "status": "approved"}}
-                    )
 
     return {"status": "success"}
 
-@router.get("/payments", response_model=PaginatedPaymentResponse)
+
+@router.get(
+    "/subscription_status",
+    response_model=SubscriptionStatus,
+    summary="Get Subscription Status",
+    description="Returns the subscription status of the user and the current period end date.",
+)
+async def get_subscription_status(current_user: str = Depends(get_current_user)):
+    db = get_db()
+    user = db.users.find_one({"email": current_user})
+
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    current_period_end = None
+    if user.get("current_period_end"):
+        current_period_end = user["current_period_end"].isoformat()
+
+    return SubscriptionStatus(
+        is_active=user.get("subscription_status") == "active",
+        current_period_end=current_period_end,
+        cancel_at_period_end=user.get("cancel_at_period_end", False),
+    )
+
+
+@router.get(
+    "/payments",
+    response_model=PaginatedPaymentResponse,
+    summary="Get Payments",
+    description="Returns a list of past payments for the logged in user.",
+)
 async def get_payments(
-    current_user: str = Depends(get_current_user),
-    payment_id: Optional[int] = None,
-    page: int = Query(1, ge=1),
-    size: int = Query(10, ge=1, le=100)
+    current_user: str = Depends(get_current_user), page: int = Query(1, ge=1), size: int = Query(10, ge=1, le=100)
 ):
     db = get_db()
     user = db.users.find_one({"email": current_user})
@@ -201,12 +206,9 @@ async def get_payments(
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    filter_query = {"user_id": ObjectId(user["_id"])}
-    if payment_id:
-        filter_query["payment_id"] = payment_id
+    filter_query = {"user_id": user["_id"]}
 
     total = db.payments.count_documents(filter_query)
-
     total_pages = ceil(total / size)
     skip = (page - 1) * size
 
@@ -214,23 +216,26 @@ async def get_payments(
 
     items = [
         PaymentResponse(
-            id=str(payment["payment_id"]),
+            id=str(payment["session_id"]),
             status=payment["status"],
-            amount=payment["amount"],
-            description=payment["description"],
-            payment_method=payment["payment_method"]
-        ) for payment in payments
+            amount=payment.get("amount"),
+            payment_type=payment["payment_type"],
+            checkout_url="",
+        )
+        for payment in payments
     ]
 
-    return PaginatedPaymentResponse(
-        items=items,
-        total=total,
-        page=page,
-        size=size,
-        pages=total_pages
-    )
+    return PaginatedPaymentResponse(items=items, total=total, page=page, size=size, pages=total_pages)
 
-@router.get("/user_credits")
+
+@router.get(
+    "/user_credits",
+    summary="Get User Credits",
+    description="""
+Returns the current number of credits the user has.\n
+If the user has no credits or subscription mode is enabled, 0 credits are returned.
+""",
+)
 async def get_user_credits(current_user: str = Depends(get_current_user)):
     db = get_db()
     user = db.users.find_one({"email": current_user})

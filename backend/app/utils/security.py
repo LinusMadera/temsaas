@@ -1,7 +1,10 @@
+import os
 import uuid
 from datetime import datetime, timedelta
 
+import bcrypt
 import jwt
+from ua_parser import user_agent_parser
 from bson import ObjectId
 from config import JWT_ALGORITHM, JWT_SECRET
 from database import get_db
@@ -9,21 +12,89 @@ from fastapi import Depends, HTTPException, Request
 from fastapi.responses import Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from models.user import UserResponse
-from passlib.context import CryptContext
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 security = HTTPBearer()
 
 
-def verify_password(plain_password, hashed_password):
-    return pwd_context.verify(plain_password, hashed_password)
+def verify_password(plain_password: str, stored_hash: str) -> bool:
+    """Verify a password against a stored hash+salt string"""
+    try:
+        password_bytes = plain_password.encode('utf-8')
+        stored_hash_bytes = stored_hash.encode('utf-8')
+        return bcrypt.checkpw(password=password_bytes, hashed_password=stored_hash_bytes)
+    except Exception:
+        return False
 
 
-def get_password_hash(password):
-    return pwd_context.hash(password)
+def get_password_hash(password: str) -> str:
+    """Generate a secure hash of the password with a unique salt"""
+    pwd_bytes = password.encode('utf-8')
+    salt = bcrypt.gensalt(rounds=12)
+
+    # Hash password with salt
+    hashed = bcrypt.hashpw(password=pwd_bytes, salt=salt)
+
+    # Return string representation
+    return hashed.decode('utf-8')
 
 
-def create_session_tokens(user_id: str, email: str) -> tuple[str, str]:
+def parse_user_agent(user_agent_string: str) -> dict:
+    """Parse user agent string into structured data"""
+    if not user_agent_string:
+        return {}
+
+    parsed = user_agent_parser.Parse(user_agent_string)
+
+    # Helper function to build version string without "None"
+    def build_version_string(family: str, major: str = None, minor: str = None) -> str:
+        version = family
+        if major:
+            version += f" {major}"
+            if minor:
+                version += f".{minor}"
+        return version
+
+    return {
+        "raw": user_agent_string,
+        "browser": {
+            "family": parsed["user_agent"]["family"],
+            "major": parsed["user_agent"]["major"],
+            "minor": parsed["user_agent"]["minor"],
+            "patch": parsed["user_agent"]["patch"],
+            "full": build_version_string(
+                parsed["user_agent"]["family"],
+                parsed["user_agent"]["major"],
+                parsed["user_agent"]["minor"]
+            )
+        },
+        "os": {
+            "family": parsed["os"]["family"],
+            "major": parsed["os"]["major"],
+            "minor": parsed["os"]["minor"],
+            "patch": parsed["os"]["patch"],
+            "patch_minor": parsed["os"]["patch_minor"],
+            "full": build_version_string(
+                parsed["os"]["family"],
+                parsed["os"]["major"],
+                parsed["os"]["minor"]
+            )
+        },
+        "device": {
+            "family": parsed["device"]["family"],
+            "brand": parsed["device"]["brand"],
+            "model": parsed["device"]["model"]
+        }
+    }
+
+
+def create_session_tokens(user_id: str, email: str, request: Request = None) -> tuple[str, str]:
+    """Create access and refresh tokens for a user session
+
+    Args:
+        user_id: User's ID
+        email: User's email
+        request: Optional FastAPI Request object for additional session info
+    """
     invalidate_id = str(uuid.uuid4())
     db = get_db()
 
@@ -34,7 +105,10 @@ def create_session_tokens(user_id: str, email: str) -> tuple[str, str]:
             "sub": email,
             "exp": access_expires,
             "type": "access",
-            "invalidate_id": invalidate_id
+            "invalidate_id": invalidate_id,
+            "jti": str(uuid.uuid4()),
+            "iat": datetime.utcnow(),
+            "nbf": datetime.utcnow(),
         },
         JWT_SECRET,
         algorithm=JWT_ALGORITHM
@@ -52,13 +126,24 @@ def create_session_tokens(user_id: str, email: str) -> tuple[str, str]:
         algorithm=JWT_ALGORITHM
     )
 
-    db.sessions.insert_one({
+    session_data = {
         "invalidate_id": invalidate_id,
         "user_id": ObjectId(user_id),
         "created_at": datetime.utcnow(),
         "expires_at": refresh_expires,
-        "last_used": datetime.utcnow()
-    })
+        "last_used": datetime.utcnow(),
+        "is_active": True
+    }
+
+    # Add request-specific data if available
+    if request:
+        client_data = {
+            "ip_address": request.client.host,
+            "client_info": parse_user_agent(request.headers.get("user-agent"))
+        }
+        session_data.update(client_data)
+
+    db.sessions.insert_one(session_data)
 
     return access_token, refresh_token
 
@@ -125,7 +210,13 @@ async def get_current_user(request: Request):
     return payload.get("sub")
 
 
-def create_user_response(user: dict) -> dict:
+def create_user_response(user: dict, request: Request = None) -> dict:
+    """Create a standardized user response with tokens
+
+    Args:
+        user: User document from database
+        request: Optional FastAPI Request object for session info
+    """
     user_response = UserResponse(
         email=user["email"],
         username=user["username"],
@@ -136,7 +227,11 @@ def create_user_response(user: dict) -> dict:
         terms_accepted=user.get("terms_accepted", False),
     )
 
-    access_token, refresh_token = create_session_tokens(str(user["_id"]), user["email"])
+    access_token, refresh_token = create_session_tokens(
+        str(user["_id"]),
+        user["email"],
+        request
+    )
 
     return {
         "access_token": access_token,

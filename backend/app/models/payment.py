@@ -1,28 +1,22 @@
 from decimal import Decimal
 from typing import List, Optional
-
 from pydantic import BaseModel, Field
+from enum import Enum
 
-
-class CardInfo(BaseModel):
-    card_number: str
-    expiration_month: int
-    expiration_year: int
-    security_code: str
-    cardholder_name: str
+class PaymentType(str, Enum):
+    CREDIT = "credit"
+    SUBSCRIPTION = "subscription"
 
 class PaymentCreate(BaseModel):
-    amount: Decimal = Field(..., decimal_places=2)
-    description: str
-    installments: int = 1
-    payment_method: str  # 'credit_card' or 'pix'
+    amount: Optional[Decimal] = Field(None, decimal_places=2)
+    payment_type: PaymentType
 
 class PaymentResponse(BaseModel):
     id: str
     status: str
-    amount: float
-    description: str
-    payment_method: str
+    amount: Optional[float]
+    payment_type: PaymentType
+    checkout_url: str
 
     class Config:
         json_encoders = {
@@ -36,11 +30,7 @@ class PaginatedPaymentResponse(BaseModel):
     size: int
     pages: int
 
-class PixPaymentCreate(BaseModel):
-    amount: Decimal = Field(..., decimal_places=2)
-    description: str
-
-class PixPaymentResponse(BaseModel):
-    qr_code: str
-    qr_code_base64: str
-    ticket_url: str
+class SubscriptionStatus(BaseModel):
+    is_active: bool
+    current_period_end: Optional[str]
+    cancel_at_period_end: bool

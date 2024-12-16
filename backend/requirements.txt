@@ -7,5 +7,6 @@ PyJWT
 email-validator
 python-dotenv
 bcrypt
-mercadopago
+stripe
 google-auth
+ua-parser[regex]

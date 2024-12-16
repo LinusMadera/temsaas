@@ -44,3 +44,12 @@ class TokenResponse(BaseModel):
     refresh_token: str
     token_type: str = "bearer"
     data: UserResponse
+
+class User(BaseModel):
+    email: EmailStr
+    hashed_password: str
+    credits: float = 0
+    subscription_status: Optional[str] = None
+    subscription_id: Optional[str] = None
+    current_period_end: Optional[datetime] = None
+    cancel_at_period_end: bool = False
