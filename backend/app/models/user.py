@@ -40,9 +40,6 @@ class TokenRefresh(BaseModel):
     refresh_token: str
 
 class TokenResponse(BaseModel):
-    access_token: str
-    refresh_token: str
-    token_type: str = "bearer"
     data: UserResponse
 
 class User(BaseModel):
@@ -53,3 +50,15 @@ class User(BaseModel):
     subscription_id: Optional[str] = None
     current_period_end: Optional[datetime] = None
     cancel_at_period_end: bool = False
+
+class UserResetPassword(BaseModel):
+    new_password: str
+
+class GoogleUserCreate(BaseModel):
+    email: EmailStr
+    username: str
+    google_id: str
+
+class GoogleUsernameSetup(BaseModel):
+    google_id: str
+    username: str

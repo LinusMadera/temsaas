@@ -6,7 +6,7 @@ import uvicorn
 from config import SOFTWARE_NAME
 from database import close_db, get_db, init_db
 from fastapi import BackgroundTasks, FastAPI
-from routers import auth, legal, payment, protected
+from routers import auth, data, legal, oauth, password, payment, protected
 
 
 @asynccontextmanager
@@ -18,6 +18,7 @@ async def lifespan(app: FastAPI):
     yield
     close_db()
 
+
 async def cleanup_expired_sessions():
     while True:
         try:
@@ -28,19 +29,23 @@ async def cleanup_expired_sessions():
             print(f"Error cleaning up sessions: {e}")
             await asyncio.sleep(60)
 
+
 app = FastAPI(
     lifespan=lifespan,
     title=f"{SOFTWARE_NAME} API",
     description=f"{SOFTWARE_NAME} backend API service",
-    version="alpha",
-    redoc_url="/redoc",
-    docs_url="/swagger"
-    )
+    version="beta",
+    redoc_url=None,
+    docs_url="/swagger",
+)
 
 app.include_router(auth.router, prefix="/auth", tags=["Authentication"])
+app.include_router(oauth.router, prefix="/oauth", tags=["OAuth"])
+app.include_router(password.router, prefix="/pass", tags=["Password Reset"])
 app.include_router(payment.router, prefix="/payment", tags=["Payment"])
-app.include_router(protected.router, prefix="/test", tags=["Test (Restricted Routes)"])
 app.include_router(legal.router, prefix="/legal", tags=["Legal"])
+app.include_router(data.router, prefix="/data", tags=["Data"])
+app.include_router(protected.router, prefix="/test", tags=["Test (Restricted Routes)"])
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)

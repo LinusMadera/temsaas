@@ -10,11 +10,12 @@ from google.oauth2 import id_token
 def verify_google_token(token: str):
     try:
         idinfo = id_token.verify_oauth2_token(token, google_requests.Request(), GOOGLE_CLIENT_ID)
-        if idinfo['iss'] not in ['accounts.google.com', 'https://accounts.google.com']:
-            raise ValueError('Wrong issuer.')
+        if idinfo["iss"] not in ["accounts.google.com", "https://accounts.google.com"]:
+            raise ValueError("Wrong issuer.")
         return idinfo
     except ValueError as e:
         raise HTTPException(status_code=400, detail=f"Invalid token: {str(e)}")
+
 
 def get_google_auth_url(redirect_uri: str):
     """Generate Google OAuth 2.0 authorization URL"""
@@ -28,6 +29,7 @@ def get_google_auth_url(redirect_uri: str):
         "prompt": "consent",
     }
     return f"{base_url}?{urlencode(params)}"
+
 
 def get_google_token(code: str, redirect_uri: str):
     """Exchange authorization code for access token"""

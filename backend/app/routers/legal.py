@@ -6,8 +6,8 @@ from utils.security import get_current_user
 router = APIRouter()
 
 
-@router.post(
-    "/accept-terms",
+@router.put(
+    "/users/terms",
     summary="Accept Terms and Conditions",
     description="Updates the user's acceptance status for terms and conditions.",
 )

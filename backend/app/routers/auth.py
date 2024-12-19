@@ -1,25 +1,15 @@
 import asyncio
 from datetime import datetime, timedelta
-from urllib.parse import unquote_plus
 
 import jwt
 from bson import ObjectId
-from config import (
-    FACEBOOK_CLIENT_ID,
-    FACEBOOK_CLIENT_SECRET,
-    GOOGLE_CLIENT_ID,
-    GOOGLE_CLIENT_SECRET,
-    JWT_ALGORITHM,
-    JWT_SECRET,
-)
+from config import JWT_ALGORITHM, JWT_SECRET
 from database import get_db
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
-from fastapi.responses import JSONResponse, RedirectResponse, Response
+from fastapi.responses import Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from models.user import GoogleLogin, TokenRefresh, UserAcceptTerms, UserChangePassword, UserCreate, UserLogin
+from models.user import UserCreate, UserLogin
 from utils.email_utils import create_verification_token, send_verification_email, verify_email_token
-from utils.facebook_auth import get_facebook_auth_url, get_facebook_token, get_facebook_user_info
-from utils.google_auth import get_google_auth_url, get_google_token, verify_google_token
 from utils.security import (
     clear_auth_cookies,
     create_session_tokens,
@@ -42,11 +32,11 @@ async def send_email_async(to_email: str, token: str):
 
 
 @router.post(
-    "/register",
+    "/users",
     summary="Register a new user",
     description="Registers a new user and sends a verification email.",
 )
-async def register(user: UserCreate, background_tasks: BackgroundTasks):
+async def register(user: UserCreate, background_tasks: BackgroundTasks, request: Request, response: Response):
     db = get_db()
     existing_user = db.users.find_one({"email": user.email})
     if existing_user:
@@ -67,11 +57,14 @@ async def register(user: UserCreate, background_tasks: BackgroundTasks):
     verification_token = create_verification_token(user.email)
     background_tasks.add_task(send_email_async, user.email, verification_token)
 
-    return create_user_response(new_user)
+    user_response = create_user_response(new_user, request)
+    set_auth_cookies(response, user_response["access_token"], user_response["refresh_token"])
+
+    return {"data": user_response["data"]}
 
 
 @router.post(
-    "/login",
+    "/sessions",
     summary="Login with email and password",
     description="""
 Logs in a user with their email and password.\n
@@ -94,7 +87,7 @@ async def login(response: Response, request: Request, user: UserLogin):
 
 
 @router.post(
-    "/refresh",
+    "/sessions/refresh",
     summary="Refresh access token",
     description="Refreshes the access token using the refresh token.",
 )
@@ -132,8 +125,8 @@ async def refresh_token(response: Response, request: Request):
         raise HTTPException(status_code=401, detail="Invalid refresh token")
 
 
-@router.post(
-    "/logout",
+@router.delete(
+    "/sessions",
     summary="Logout a user",
     description="Logs out a user by invalidating the access token and clearing auth cookies.",
 )
@@ -153,8 +146,8 @@ async def logout(response: Response, request: Request):
     return {"message": "Logged out successfully"}
 
 
-@router.get(
-    "/verify-email",
+@router.put(
+    "/users/email/verify",
     summary="Verify email address",
     description="""
 Verifies the email address using a verification token.\n
@@ -176,7 +169,7 @@ async def verify_email(token: str):
 
 
 @router.post(
-    "/resend-verification",
+    "/users/email/verify/resend",
     summary="Resend verification email",
     description="If the user's email was not verified, triggers a new verification email to be sent.",
 )
@@ -192,144 +185,3 @@ async def resend_verification(email: str, background_tasks: BackgroundTasks):
     background_tasks.add_task(send_email_async, email, verification_token)
 
     return {"message": "Verification email resent"}
-
-
-@router.get(
-    "/login/google",
-    summary="Initiate Google Sign-In process",
-    description="Initiates the Google Sign-In process by redirecting to Google's authorization page.",
-)
-async def login_google(request: Request):
-    """Initiate Google Sign-In process"""
-    redirect_uri = str(request.url_for("google_auth_callback"))
-    return RedirectResponse(get_google_auth_url(redirect_uri))
-
-
-@router.get(
-    "/login/google/callback",
-    summary="Handle Google Sign-In callback",
-    description="Handles the Google Sign-In callback by verifying the authorization code and creating a new user if necessary.",
-)
-async def google_auth_callback(request: Request):
-    """Handle Google Sign-In callback"""
-    try:
-        params = dict(request.query_params)
-
-        if "code" not in params:
-            raise HTTPException(status_code=400, detail="Missing authorization code")
-
-        code = unquote_plus(params["code"])
-        redirect_uri = str(request.url_for("google_auth_callback"))
-
-        token = get_google_token(code, redirect_uri)
-        idinfo = verify_google_token(token)
-
-        db = get_db()
-        user = db.users.find_one({"email": idinfo["email"]})
-
-        if not user:
-            new_user = {
-                "email": idinfo["email"],
-                "username": idinfo.get("name", idinfo["email"].split("@")[0]),
-                "google_id": idinfo["sub"],
-                "credits": 0,
-                "email_verified": True,  # Google emails are pre-verified
-            }
-            result = db.users.insert_one(new_user)
-            new_user["_id"] = result.inserted_id
-            user = new_user
-        elif "google_id" not in user:
-            db.users.update_one({"_id": user["_id"]}, {"$set": {"google_id": idinfo["sub"]}})
-
-        return create_user_response(user)
-
-    except Exception as e:
-        print(f"Error in google_auth_callback: {str(e)}")
-        raise HTTPException(status_code=400, detail=f"Error processing Google callback: {str(e)}")
-
-
-@router.post(
-    "/change-password",
-    summary="Change user password",
-    description="Changes the user's password if the old password is correct. The user must know their old password.",
-)
-async def change_password(user_data: UserChangePassword, current_user: str = Depends(get_current_user)):
-    db = get_db()
-    db_user = db.users.find_one({"email": current_user})
-    if not db_user or not verify_password(user_data.old_password, db_user["password"]):
-        raise HTTPException(status_code=400, detail="Incorrect email or password")
-    new_hashed_password = get_password_hash(user_data.new_password)
-    db.users.update_one({"email": current_user}, {"$set": {"password": new_hashed_password}})
-    return {"message": "Password changed successfully"}
-
-
-@router.get(
-    "/user",
-    summary="Get user information",
-    description="Returns the logged in user's information.",
-)
-async def get_user_info(current_user: str = Depends(get_current_user)):
-    db = get_db()
-    user = db.users.find_one({"email": current_user})
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    return {
-        "email": user["email"],
-        "username": user["username"],
-        "created_at": user["created_at"].isoformat(),
-        "credits": user.get("credits", 0),
-        "email_verified": user.get("email_verified", False),
-        "terms_accepted": user.get("terms_accepted", False),
-    }
-
-
-@router.get(
-    "/login/facebook",
-    summary="Initiate Facebook Sign-In process",
-    description="Initiates the Facebook Sign-In process by redirecting to Facebook's authorization page.",
-)
-async def login_facebook(request: Request):
-    """Initiate Facebook Sign-In process"""
-    redirect_uri = str(request.url_for("facebook_auth_callback"))
-    return RedirectResponse(get_facebook_auth_url(redirect_uri))
-
-
-@router.get(
-    "/login/facebook/callback",
-    summary="Handle Facebook Sign-In callback",
-    description="Handles the Facebook Sign-In callback by verifying the authorization code and creating a new user if necessary.",
-)
-async def facebook_auth_callback(request: Request):
-    """Handle Facebook Sign-In callback"""
-    try:
-        params = dict(request.query_params)
-        if "code" not in params:
-            raise HTTPException(status_code=400, detail="Missing authorization code")
-
-        redirect_uri = str(request.url_for("facebook_auth_callback"))
-        access_token = get_facebook_token(params["code"], redirect_uri)
-        user_info = get_facebook_user_info(access_token)
-
-        db = get_db()
-        user = db.users.find_one({"email": user_info["email"]})
-
-        if not user:
-            new_user = {
-                "email": user_info["email"],
-                "username": user_info.get("name", user_info["email"].split("@")[0]),
-                "facebook_id": user_info["id"],
-                "credits": 0,
-                "email_verified": True,
-                "created_at": datetime.utcnow(),
-            }
-            result = db.users.insert_one(new_user)
-            new_user["_id"] = result.inserted_id
-            user = new_user
-        elif "facebook_id" not in user:
-            db.users.update_one({"_id": user["_id"]}, {"$set": {"facebook_id": user_info["id"]}})
-
-        return create_user_response(user)
-
-    except Exception as e:
-        print(f"Error in facebook_auth_callback: {str(e)}")
-        raise HTTPException(status_code=400, detail=f"Error processing Facebook callback: {str(e)}")

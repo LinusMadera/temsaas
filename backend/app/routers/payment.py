@@ -3,27 +3,29 @@ from math import ceil
 from typing import Optional
 
 import stripe
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from bson import ObjectId
 from config import (
+    CANCEL_URL,
+    COMPANY_NAME,
+    CREDIT_VALUE,
+    PAYMENT_MODE,
+    SOFTWARE_NAME,
     STRIPE_SECRET_KEY,
     STRIPE_WEBHOOK_SECRET,
-    PAYMENT_MODE,
-    CREDIT_VALUE,
     SUBSCRIPTION_PRICE_ID,
     SUCCESS_URL,
-    CANCEL_URL,
 )
 from database import get_db
-from models.payment import PaymentCreate, PaymentResponse, PaginatedPaymentResponse, PaymentType, SubscriptionStatus
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from models.payment import PaginatedPaymentResponse, PaymentCreate, PaymentResponse, PaymentType, SubscriptionStatus
 from utils.security import get_current_user
-from bson import ObjectId
 
 router = APIRouter()
 stripe.api_key = STRIPE_SECRET_KEY
 
 
 @router.post(
-    "/create_checkout",
+    "/checkout",
     response_model=PaymentResponse,
     summary="Create Checkout Session",
     description="""
@@ -77,7 +79,7 @@ async def create_checkout_session(payment: PaymentCreate, current_user: str = De
                         "price_data": {
                             "currency": "usd",
                             "product_data": {
-                                "name": f"{credits} Credits",
+                                "name": f"{COMPANY_NAME} | {SOFTWARE_NAME}",
                             },
                             "unit_amount": int(float(payment.amount) * 100),  # Convert to cents
                         },
@@ -116,7 +118,7 @@ async def create_checkout_session(payment: PaymentCreate, current_user: str = De
 
 
 @router.post(
-    "/webhook",
+    "/webhooks/stripe",
     summary="Stripe Webhook",
     description="Receives verified webhook events from Stripe. Should not be called manually.",
 )
@@ -168,7 +170,7 @@ async def stripe_webhook(request: Request):
 
 
 @router.get(
-    "/subscription_status",
+    "/users/subscription",
     response_model=SubscriptionStatus,
     summary="Get Subscription Status",
     description="Returns the subscription status of the user and the current period end date.",
@@ -192,7 +194,7 @@ async def get_subscription_status(current_user: str = Depends(get_current_user))
 
 
 @router.get(
-    "/payments",
+    "/users/payments",
     response_model=PaginatedPaymentResponse,
     summary="Get Payments",
     description="Returns a list of past payments for the logged in user.",
@@ -229,7 +231,7 @@ async def get_payments(
 
 
 @router.get(
-    "/user_credits",
+    "/users/credits",
     summary="Get User Credits",
     description="""
 Returns the current number of credits the user has.\n

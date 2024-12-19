@@ -12,9 +12,6 @@ def check_and_deduct_credits(user_email: str, required_credits: float):
     if user.get("credits", 0) < required_credits:
         raise HTTPException(status_code=403, detail="Insufficient credits")
 
-    db.users.update_one(
-        {"_id": user["_id"]},
-        {"$inc": {"credits": -required_credits}}
-    )
+    db.users.update_one({"_id": user["_id"]}, {"$inc": {"credits": -required_credits}})
 
     return True

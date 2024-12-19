@@ -4,7 +4,6 @@ from datetime import datetime, timedelta
 
 import bcrypt
 import jwt
-from ua_parser import user_agent_parser
 from bson import ObjectId
 from config import JWT_ALGORITHM, JWT_SECRET
 from database import get_db
@@ -12,6 +11,7 @@ from fastapi import Depends, HTTPException, Request
 from fastapi.responses import Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from models.user import UserResponse
+from ua_parser import user_agent_parser
 
 security = HTTPBearer()
 
@@ -19,8 +19,8 @@ security = HTTPBearer()
 def verify_password(plain_password: str, stored_hash: str) -> bool:
     """Verify a password against a stored hash+salt string"""
     try:
-        password_bytes = plain_password.encode('utf-8')
-        stored_hash_bytes = stored_hash.encode('utf-8')
+        password_bytes = plain_password.encode("utf-8")
+        stored_hash_bytes = stored_hash.encode("utf-8")
         return bcrypt.checkpw(password=password_bytes, hashed_password=stored_hash_bytes)
     except Exception:
         return False
@@ -28,14 +28,14 @@ def verify_password(plain_password: str, stored_hash: str) -> bool:
 
 def get_password_hash(password: str) -> str:
     """Generate a secure hash of the password with a unique salt"""
-    pwd_bytes = password.encode('utf-8')
+    pwd_bytes = password.encode("utf-8")
     salt = bcrypt.gensalt(rounds=12)
 
     # Hash password with salt
     hashed = bcrypt.hashpw(password=pwd_bytes, salt=salt)
 
     # Return string representation
-    return hashed.decode('utf-8')
+    return hashed.decode("utf-8")
 
 
 def parse_user_agent(user_agent_string: str) -> dict:
@@ -62,10 +62,8 @@ def parse_user_agent(user_agent_string: str) -> dict:
             "minor": parsed["user_agent"]["minor"],
             "patch": parsed["user_agent"]["patch"],
             "full": build_version_string(
-                parsed["user_agent"]["family"],
-                parsed["user_agent"]["major"],
-                parsed["user_agent"]["minor"]
-            )
+                parsed["user_agent"]["family"], parsed["user_agent"]["major"], parsed["user_agent"]["minor"]
+            ),
         },
         "os": {
             "family": parsed["os"]["family"],
@@ -73,27 +71,23 @@ def parse_user_agent(user_agent_string: str) -> dict:
             "minor": parsed["os"]["minor"],
             "patch": parsed["os"]["patch"],
             "patch_minor": parsed["os"]["patch_minor"],
-            "full": build_version_string(
-                parsed["os"]["family"],
-                parsed["os"]["major"],
-                parsed["os"]["minor"]
-            )
+            "full": build_version_string(parsed["os"]["family"], parsed["os"]["major"], parsed["os"]["minor"]),
         },
         "device": {
             "family": parsed["device"]["family"],
             "brand": parsed["device"]["brand"],
-            "model": parsed["device"]["model"]
-        }
+            "model": parsed["device"]["model"],
+        },
     }
 
 
-def create_session_tokens(user_id: str, email: str, request: Request = None) -> tuple[str, str]:
+def create_session_tokens(user_id: str, email: str, request: Request) -> tuple[str, str]:
     """Create access and refresh tokens for a user session
 
     Args:
         user_id: User's ID
         email: User's email
-        request: Optional FastAPI Request object for additional session info
+        request: FastAPI Request object for session info
     """
     invalidate_id = str(uuid.uuid4())
     db = get_db()
@@ -111,19 +105,14 @@ def create_session_tokens(user_id: str, email: str, request: Request = None) -> 
             "nbf": datetime.utcnow(),
         },
         JWT_SECRET,
-        algorithm=JWT_ALGORITHM
+        algorithm=JWT_ALGORITHM,
     )
 
     refresh_expires = datetime.utcnow() + timedelta(days=30)
     refresh_token = jwt.encode(
-        {
-            "user_id": str(user_id),
-            "exp": refresh_expires,
-            "type": "refresh",
-            "invalidate_id": invalidate_id
-        },
+        {"user_id": str(user_id), "exp": refresh_expires, "type": "refresh", "invalidate_id": invalidate_id},
         JWT_SECRET,
-        algorithm=JWT_ALGORITHM
+        algorithm=JWT_ALGORITHM,
     )
 
     session_data = {
@@ -132,16 +121,10 @@ def create_session_tokens(user_id: str, email: str, request: Request = None) -> 
         "created_at": datetime.utcnow(),
         "expires_at": refresh_expires,
         "last_used": datetime.utcnow(),
-        "is_active": True
+        "is_active": True,
+        "ip_address": request.client.host,
+        "client_info": parse_user_agent(request.headers.get("user-agent")),
     }
-
-    # Add request-specific data if available
-    if request:
-        client_data = {
-            "ip_address": request.client.host,
-            "client_info": parse_user_agent(request.headers.get("user-agent"))
-        }
-        session_data.update(client_data)
 
     db.sessions.insert_one(session_data)
 
@@ -161,8 +144,7 @@ def verify_token(token: str, token_type: str = "access"):
             raise HTTPException(status_code=401, detail="Invalid session")
 
         db.sessions.update_one(
-            {"invalidate_id": payload.get("invalidate_id")},
-            {"$set": {"last_used": datetime.utcnow()}}
+            {"invalidate_id": payload.get("invalidate_id")}, {"$set": {"last_used": datetime.utcnow()}}
         )
 
         return payload
@@ -179,20 +161,10 @@ def invalidate_session(invalidate_id: str):
 
 def set_auth_cookies(response: Response, access_token: str, refresh_token: str):
     response.set_cookie(
-        key="access_token",
-        value=access_token,
-        httponly=True,
-        secure=True,
-        samesite="lax",
-        max_age=3600  # 1 hour
+        key="access_token", value=access_token, httponly=True, secure=True, samesite="lax", max_age=3600  # 1 hour
     )
     response.set_cookie(
-        key="refresh_token",
-        value=refresh_token,
-        httponly=True,
-        secure=True,
-        samesite="lax",
-        max_age=2592000  # 30 days
+        key="refresh_token", value=refresh_token, httponly=True, secure=True, samesite="lax", max_age=2592000  # 30 days
     )
 
 
@@ -210,12 +182,12 @@ async def get_current_user(request: Request):
     return payload.get("sub")
 
 
-def create_user_response(user: dict, request: Request = None) -> dict:
+def create_user_response(user: dict, request: Request) -> dict:
     """Create a standardized user response with tokens
 
     Args:
         user: User document from database
-        request: Optional FastAPI Request object for session info
+        request: FastAPI Request object for session info
     """
     user_response = UserResponse(
         email=user["email"],
@@ -227,15 +199,10 @@ def create_user_response(user: dict, request: Request = None) -> dict:
         terms_accepted=user.get("terms_accepted", False),
     )
 
-    access_token, refresh_token = create_session_tokens(
-        str(user["_id"]),
-        user["email"],
-        request
-    )
+    access_token, refresh_token = create_session_tokens(str(user["_id"]), user["email"], request)
 
     return {
         "access_token": access_token,
         "refresh_token": refresh_token,
-        "token_type": "bearer",
         "data": user_response.dict(),
     }
